@@ -6,16 +6,317 @@
   <title>DTMF GPS Packet v1</title>
   <style>
     :root{color-scheme:dark}
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:700px;margin:20px auto;padding:0 16px;background:#0b1220;color:#e8eefc}
-    button,input{font-size:16px;padding:10px 12px;border-radius:10px;border:0}
-    button{background:#4f7cff;color:#fff;font-weight:600;margin-right:8px;margin-top:8px}
+    body{
+      font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+      max-width:700px;
+      margin:20px auto;
+      padding:0 16px;
+      background:#0b1220;
+      color:#e8eefc;
+    }
+    button,input{
+      font-size:16px;
+      padding:10px 12px;
+      border-radius:10px;
+      border:0;
+    }
+    button{
+      background:#4f7cff;
+      color:#fff;
+      font-weight:600;
+      margin-right:8px;
+      margin-top:8px;
+    }
     button.secondary{background:#26324e}
-    input{width:100%;background:#0b1220;color:#e8eefc;border:1px solid #2a3550;margin-top:8px}
-    #log{white-space:pre-wrap;line-height:1.45;background:#08101d;padding:10px;border-radius:10px;min-height:140px;margin-top:10px}
+    input{
+      width:100%;
+      background:#0b1220;
+      color:#e8eefc;
+      border:1px solid #2a3550;
+      margin-top:8px;
+    }
+    #log,#encodeOutput,#decodeOutput{
+      white-space:pre-wrap;
+      line-height:1.45;
+      background:#08101d;
+      padding:10px;
+      border-radius:10px;
+      min-height:80px;
+      margin-top:10px;
+    }
+    h2{margin-top:24px}
   </style>
 </head>
+<body>
+  <h1>DTMF GPS Packet v1</h1>
 
-<script>
+  <h2>1. Acoustic packet demo (old test)</h2>
+  <p>Fixed-length packet: attention tone + 16 digits. Receiver only decodes inside that window.</p>
+  <div>
+    <label>16-digit payload (only 0-9):</label>
+    <input id="digits" value="2471364667531234" />
+    <div>
+      <button id="sendBtn">Send packet</button>
+      <button id="listenBtn" class="secondary">Listen for one packet</button>
+      <button id="stopBtn" class="secondary">Stop</button>
+      <button id="testMicBtn" class="secondary">Test mic</button>
+    </div>
+  </div>
+  <pre id="log">Ready.</pre>
+
+  <h2>2. GPS encoder/decoder + DTMF</h2>
+  <div>
+    <input id="latInput"  placeholder="Latitude (e.g. 24.7136)">
+    <input id="lonInput"  placeholder="Longitude (e.g. 46.6753)">
+    <div>
+      <button id="encodeBtn">Encode GPS → 16 digits</button>
+      <button id="decodeBtn">Decode 16 digits → GPS</button>
+      <button id="playDtmfBtn">Play DTMF (*code#)</button>
+    </div>
+    <input id="codeInput" placeholder="16-digit code (e.g. 2471364667535431)">
+  </div>
+  <pre id="encodeOutput">Encoder output here.</pre>
+  <pre id="decodeOutput">Decoder output here.</pre>
+
+  <!-- === Acoustic packet script (unchanged) === -->
+  <script>
+  const SAMPLE_RATE = 44100;
+  const SYMBOL_MS = 160;  // per digit tone
+  const GAP_MS = 60;      // silence between digits
+  const ATT_MS = 800;     // attention tone length
+  const WINDOW_MS = 160;  // analysis window = symbol length
+
+  const SYMBOLS = '0123456789';
+  const FREQS = {
+    '0': 700,
+    '1': 900,
+    '2': 1100,
+    '3': 1300,
+    '4': 1500,
+    '5': 1700,
+    '6': 1900,
+    '7': 2100,
+    '8': 2300,
+    '9': 2500
+  };
+  const ATT_FREQ = 1000;  // attention tone frequency
+
+  const logEl = document.getElementById('log');
+  const digitsEl = document.getElementById('digits');
+  const sendBtn = document.getElementById('sendBtn');
+  const listenBtn = document.getElementById('listenBtn');
+  const stopBtn = document.getElementById('stopBtn');
+  const testMicBtn = document.getElementById('testMicBtn');
+
+  let audioCtx = null;
+  let micStream = null;
+  let analyser = null;
+  let sourceNode = null;
+  let proc = null;
+  let listening = false;
+  let state = 'idle';  // 'idle' | 'looking_att' | 'digits' | 'done'
+  let symbolBuffer = '';
+  let symbolCount = 0;
+  let totalWindows = 0;
+
+  function log(msg){ logEl.textContent = msg; }
+
+  function ensureCtx(){
+    if(!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
+    return audioCtx.resume();
+  }
+
+  function toneBuffer(freq, ms, amp=0.25){
+    const len = Math.floor(SAMPLE_RATE * ms / 1000);
+    const buf = audioCtx.createBuffer(1, len, SAMPLE_RATE);
+    const data = buf.getChannelData(0);
+    for(let i=0;i<len;i++){
+      const t=i/SAMPLE_RATE;
+      const env = 0.5 - 0.5*Math.cos(2*Math.PI*i/Math.max(1,len-1));
+      data[i] = Math.sin(2*Math.PI*freq*t) * amp * env;
+    }
+    return buf;
+  }
+
+  function silenceBuffer(ms){
+    const len = Math.floor(SAMPLE_RATE * ms / 1000);
+    return audioCtx.createBuffer(1, len, SAMPLE_RATE);
+  }
+
+  async function sendPacket(text){
+    await ensureCtx();
+    let raw = String(text).trim().replace(/[^0-9]/g,'');
+    if(raw.length < 16) raw = raw.padEnd(16, '0');
+    if(raw.length > 16) raw = raw.slice(0,16);
+    digitsEl.value = raw;
+    log('Sending packet (16 digits):\n' + raw + '\n\nReceiver should be in Listen mode.');
+
+    let t = audioCtx.currentTime + 0.7;
+    // Attention tone
+    const att = toneBuffer(ATT_FREQ, ATT_MS, 0.30);
+    const sAtt = audioCtx.createBufferSource();
+    sAtt.buffer = att;
+    sAtt.connect(audioCtx.destination);
+    sAtt.start(t);
+    t += ATT_MS/1000 + 0.12;  // small gap after attention
+
+    // 16 digits, each tone + gap
+    for(const ch of raw){
+      const f = FREQS[ch];
+      if(!f) continue;
+      const tone = toneBuffer(f, SYMBOL_MS, 0.30);
+      const src = audioCtx.createBufferSource();
+      src.buffer = tone;
+      src.connect(audioCtx.destination);
+      src.start(t);
+      t += SYMBOL_MS/1000;
+      const gap = audioCtx.createBufferSource();
+      gap.buffer = silenceBuffer(GAP_MS);
+      gap.connect(audioCtx.destination);
+      gap.start(t);
+      t += GAP_MS/1000;
+    }
+
+    log('Packet sent (16 digits):\n' + raw + '\n\nReceiver should show final result after a few seconds.');
+  }
+
+  function goertzel(samples, freq, sr){
+    const k = Math.round(0.5 + samples.length * freq / sr);
+    const w = 2 * Math.PI * k / samples.length;
+    const coeff = 2 * Math.cos(w);
+    let q0=0,q1=0,q2=0;
+    for(const s of samples){
+      q0 = coeff*q1 - q2 + s;
+      q2 = q1;
+      q1 = q0;
+    }
+    return q1*q1 + q2*q2 - coeff*q1*q2;
+  }
+
+  function detectDigit(samples){
+    let sum = 0;
+    for(const s of samples) sum += s*s;
+    const totalE = sum / samples.length;
+    if(totalE < 1e-5) return null; // very quiet
+
+    const eAtt = goertzel(samples, ATT_FREQ, SAMPLE_RATE);
+
+    let bestSym = null;
+    let bestE = 0;
+    for(const ch of SYMBOLS){
+      const f = FREQS[ch];
+      const e = goertzel(samples, f, SAMPLE_RATE);
+      if(e > bestE){ bestE = e; bestSym = ch; }
+    }
+
+    return { totalE, eAtt, bestSym, bestE };
+  }
+
+  async function listenPacket(){
+    log('Listen clicked.');
+    await ensureCtx();
+
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      log('getUserMedia not supported in this browser/environment.');
+      return;
+    }
+
+    if(listening){
+      log('Already listening.');
+      return;
+    }
+
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({ audio:true });
+      sourceNode = audioCtx.createMediaStreamSource(micStream);
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 2048;
+      proc = audioCtx.createScriptProcessor(2048, 1, 1);
+      sourceNode.connect(analyser);
+      analyser.connect(proc);
+      proc.connect(audioCtx.destination);
+
+      listening = true;
+      state = 'looking_att';
+      symbolBuffer = '';
+      symbolCount = 0;
+      totalWindows = 0;
+
+      log('Listening for one packet...\n1) Attention tone\n2) Then 16 digits.');
+
+      proc.onaudioprocess = () => {
+        if(!listening) return;
+        const arr = new Float32Array(analyser.fftSize);
+        analyser.getFloatTimeDomainData(arr);
+        const chunkSize = Math.floor(SAMPLE_RATE * WINDOW_MS / 1000);
+
+        for(let i=0;i<arr.length;i+=chunkSize){
+          const chunk = arr.slice(i, i + chunkSize);
+          if(chunk.length < 64) continue;
+          totalWindows++;
+
+          const res = detectDigit(chunk);
+          if(!res) continue;
+          const { totalE, eAtt, bestSym, bestE } = res;
+
+          if(state === 'looking_att'){
+            if(eAtt > bestE && eAtt > totalE * 30){
+              state = 'digits';
+              symbolBuffer = '';
+              symbolCount = 0;
+              continue;
+            }
+          } else if(state === 'digits'){
+            if(symbolCount >= 16){
+              state = 'done';
+              listening = false;
+              stopListening();
+              log('Final decoded packet (16 digits):\n' + symbolBuffer);
+              return;
+            }
+            if(bestE > totalE * 20 && bestSym){
+              symbolBuffer += bestSym;
+              symbolCount++;
+            }
+          }
+        }
+      };
+    } catch (err) {
+      log('Error from getUserMedia:\n' + err.name + ': ' + err.message);
+    }
+  }
+
+  function stopListening(){
+    listening = false;
+    if(proc){ try{proc.disconnect();}catch(e){} proc = null; }
+    if(sourceNode){ try{sourceNode.disconnect();}catch(e){} sourceNode = null; }
+    if(analyser){ try{analyser.disconnect();}catch(e){} analyser = null; }
+    if(micStream){ micStream.getTracks().forEach(t=>t.stop()); micStream = null; }
+  }
+
+  async function testMic(){
+    log('Testing mic...');
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      log('getUserMedia not supported here.');
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio:true });
+      log('Mic test: permission OK.');
+      stream.getTracks().forEach(t => t.stop());
+    } catch (err) {
+      log('Mic test error:\n' + err.name + ': ' + err.message);
+    }
+  }
+
+  sendBtn.onclick = () => { sendPacket(digitsEl.value); };
+  listenBtn.onclick = () => { listenPacket(); };
+  stopBtn.onclick = () => { stopListening(); log('Stopped.'); };
+  testMicBtn.onclick = () => { testMic(); };
+  </script>
+
+  <!-- === GPS encoder/decoder + DTMF script === -->
+  <script>
 // === GPS <-> 16-digit code encoder/decoder ===
 // Format (16 digits):
 // 1-6:  lat * 10000, rounded, zero-padded to 6 digits
@@ -27,7 +328,7 @@
 function sumDigits(str) {
   let s = 0;
   for (const ch of str) {
-    const d = ch.charCodeAt(0) - 48; // '0' = 48
+    const d = ch.charCodeAt(0) - 48;
     if (d >= 0 && d <= 9) s += d;
   }
   return s;
@@ -50,19 +351,19 @@ function encodeGpsToCode(lat, lon) {
     throw new Error('Longitude out of range (-180 to 180).');
   }
 
-  const latScaled = lat * 10000; // e.g. 24.7136 -> 247136
-  const lonScaled = lon * 10000; // e.g. 46.6753 -> 466753
+  const latScaled = lat * 10000;
+  const lonScaled = lon * 10000;
 
   const lat6 = pad6(latScaled);
   const lon6 = pad6(lonScaled);
 
   const base12 = lat6 + lon6;
 
-  const sumAll = sumDigits(base12) % 100; // 0..99
-  const sumLat = sumDigits(lat6) % 10;    // 0..9
-  const sumLon = sumDigits(lon6) % 10;    // 0..9
+  const sumAll = sumDigits(base12) % 100;
+  const sumLat = sumDigits(lat6) % 10;
+  const sumLon = sumDigits(lon6) % 10;
 
-  const cAll = sumAll.toString().padStart(2, '0'); // 2 digits
+  const cAll = sumAll.toString().padStart(2, '0');
   const cLat = sumLat.toString();
   const cLon = sumLon.toString();
 
@@ -90,7 +391,6 @@ function decodeCodeToGps(code) {
 
   const base12 = lat6 + lon6;
 
-  // Recompute checksum
   const sumAll = sumDigits(base12) % 100;
   const sumLat = sumDigits(lat6) % 10;
   const sumLon = sumDigits(lon6) % 10;
@@ -104,7 +404,6 @@ function decodeCodeToGps(code) {
   const latScaled = parseInt(lat6, 10);
   const lonScaled = parseInt(lon6, 10);
 
-  // Note: this assumes positive values; for full globe coverage you’d add sign handling.
   const lat = latScaled / 10000;
   const lon = lonScaled / 10000;
 
@@ -120,7 +419,6 @@ function decodeCodeToGps(code) {
 }
 
 /* ---------- DTMF audio playback helpers ---------- */
-// Standard DTMF frequency table [web:41][web:108]
 const DTMF_FREQS = {
   '1': [697, 1209],
   '2': [697, 1336],
@@ -151,381 +449,4 @@ async function ensureDtmfCtx() {
 function createDtmfToneBuffer(freqLow, freqHigh, ms, gain = 0.25) {
   const ctx = dtmfAudioCtx;
   const sampleRate = ctx.sampleRate;
-  const length = Math.floor(sampleRate * ms / 1000);
-  const buffer = ctx.createBuffer(1, length, sampleRate);
-  const data = buffer.getChannelData(0);
-
-  for (let i = 0; i < length; i++) {
-    const t = i / sampleRate;
-    const env = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / Math.max(1, length - 1));
-    const low = Math.sin(2 * Math.PI * freqLow * t);
-    const high = Math.sin(2 * Math.PI * freqHigh * t);
-    data[i] = (low + high) * 0.5 * gain * env;
-  }
-
-  return buffer;
-}
-
-async function playDtmfSequence(sequence, toneMs = 120, gapMs = 60) {
-  const ctx = await ensureDtmfCtx();
-  const now = ctx.currentTime;
-  let t = now + 0.15; // small delay
-
-  for (const ch of sequence) {
-    const pair = DTMF_FREQS[ch];
-    if (!pair) continue; // ignore unknown chars
-    const buf = createDtmfToneBuffer(pair[0], pair[1], toneMs, 0.3);
-    const src = ctx.createBufferSource();
-    src.buffer = buf;
-    src.connect(ctx.destination);
-    src.start(t);
-    t += toneMs / 1000;
-    t += gapMs / 1000; // gap
-  }
-}
-
-/* ---------- Wire up UI ---------- */
-(function attachGpsCodeUi(){
-  const latInput    = document.getElementById('latInput');
-  const lonInput    = document.getElementById('lonInput');
-  const codeInput   = document.getElementById('codeInput');
-  const encodeBtn   = document.getElementById('encodeBtn');
-  const decodeBtn   = document.getElementById('decodeBtn');
-  const playDtmfBtn = document.getElementById('playDtmfBtn');
-  const encodeOutEl = document.getElementById('encodeOutput');
-  const decodeOutEl = document.getElementById('decodeOutput');
-
-  if (!latInput || !lonInput || !codeInput ||
-      !encodeBtn || !decodeBtn ||
-      !encodeOutEl || !decodeOutEl) {
-    console.warn('GPS encoder/decoder UI elements not found. Skipping wiring.');
-    return;
-  }
-
-  encodeBtn.onclick = () => {
-    try {
-      const lat = parseFloat(latInput.value);
-      const lon = parseFloat(lonInput.value);
-      const res = encodeGpsToCode(lat, lon);
-
-      const dtmf = '*' + res.code + '#'; // DTMF framing
-
-      encodeOutEl.textContent =
-        'Encoded 16-digit code:\n' +
-        res.code + '\n\n' +
-        'DTMF sequence (start=* , end=#):\n' +
-        dtmf + '\n\n' +
-        'Checksum digits: ' + res.checksum;
-
-      // Populate the code input for easy decode / play
-      codeInput.value = res.code;
-    } catch (err) {
-      encodeOutEl.textContent = 'Error: ' + err.message;
-    }
-  };
-
-  decodeBtn.onclick = () => {
-    try {
-      const res = decodeCodeToGps(codeInput.value);
-      decodeOutEl.textContent =
-        'Decoded GPS (approx):\n' +
-        'Latitude:  ' + res.lat.toFixed(4) + '\n' +
-        'Longitude: ' + res.lon.toFixed(4) + '\n\n' +
-        'Checksum in code:   ' + res.checksum + '\n' +
-        'Expected checksum:  ' + res.expectedChecksum + '\n' +
-        'Checksum OK: ' + (res.checksumOk ? 'YES' : 'NO');
-    } catch (err) {
-      decodeOutEl.textContent = 'Error: ' + err.message;
-    }
-  };
-
-  if (playDtmfBtn) {
-    playDtmfBtn.onclick = async () => {
-      try {
-        const rawCode = (codeInput.value || '').trim().replace(/\D/g, '');
-        if (rawCode.length !== 16) {
-          encodeOutEl.textContent = 'Play DTMF error: code must be 16 digits in the code field.';
-          return;
-        }
-        const framed = '*' + rawCode + '#';
-        encodeOutEl.textContent =
-          (encodeOutEl.textContent || '') +
-          '\n\nPlaying DTMF sequence:\n' + framed;
-        await playDtmfSequence(framed);
-      } catch (err) {
-        encodeOutEl.textContent = 'Play DTMF error: ' + err.message;
-      }
-    };
-  }
-})();
-</script>
-  
-<body>
-  <h1>DTMF GPS Packet v1</h1>
-  <p>Fixed-length packet: attention tone + 16 digits. Receiver only decodes inside that window.</p>
-
-  <div>
-    <label>16-digit payload (only 0-9):</label>
-    <input id="digits" value="2471364667531234" />
-    <div>
-      <button id="sendBtn">Send packet</button>
-      <button id="listenBtn" class="secondary">Listen for one packet</button>
-      <button id="stopBtn" class="secondary">Stop</button>
-      <button id="testMicBtn" class="secondary">Test mic</button>
-    </div>
-  </div>
-<input id="latInput"  placeholder="Latitude (e.g. 24.7136)">
-<input id="lonInput"  placeholder="Longitude (e.g. 46.6753)">
-<button id="encodeBtn">Encode GPS → 16 digits</button>
-<button id="decodeBtn">Decode 16 digits → GPS</button>
-<button id="playDtmfBtn">Play DTMF (*code#)</button>
-<input id="codeInput" placeholder="16-digit code">
-<pre id="encodeOutput"></pre>
-<pre id="decodeOutput"></pre>
-  <pre id="log">Ready.</pre>
-
-<script>
-const SAMPLE_RATE = 44100;
-const SYMBOL_MS = 160;  // per digit tone
-const GAP_MS = 60;      // silence between digits
-const ATT_MS = 800;     // attention tone length
-const WINDOW_MS = 160;  // analysis window = symbol length
-
-const SYMBOLS = '0123456789';
-const FREQS = {
-  '0': 700,
-  '1': 900,
-  '2': 1100,
-  '3': 1300,
-  '4': 1500,
-  '5': 1700,
-  '6': 1900,
-  '7': 2100,
-  '8': 2300,
-  '9': 2500
-};
-const ATT_FREQ = 1000;  // attention tone frequency
-
-const logEl = document.getElementById('log');
-const digitsEl = document.getElementById('digits');
-const sendBtn = document.getElementById('sendBtn');
-const listenBtn = document.getElementById('listenBtn');
-const stopBtn = document.getElementById('stopBtn');
-const testMicBtn = document.getElementById('testMicBtn');
-
-let audioCtx = null;
-let micStream = null;
-let analyser = null;
-let sourceNode = null;
-let proc = null;
-let listening = false;
-let state = 'idle';  // 'idle' | 'looking_att' | 'digits' | 'done'
-let symbolBuffer = '';
-let symbolCount = 0;
-let totalWindows = 0;
-
-function log(msg){ logEl.textContent = msg; }
-
-function ensureCtx(){
-  if(!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
-  return audioCtx.resume();
-}
-
-function toneBuffer(freq, ms, amp=0.25){
-  const len = Math.floor(SAMPLE_RATE * ms / 1000);
-  const buf = audioCtx.createBuffer(1, len, SAMPLE_RATE);
-  const data = buf.getChannelData(0);
-  for(let i=0;i<len;i++){
-    const t=i/SAMPLE_RATE;
-    const env = 0.5 - 0.5*Math.cos(2*Math.PI*i/Math.max(1,len-1));
-    data[i] = Math.sin(2*Math.PI*freq*t) * amp * env;
-  }
-  return buf;
-}
-
-function silenceBuffer(ms){
-  const len = Math.floor(SAMPLE_RATE * ms / 1000);
-  return audioCtx.createBuffer(1, len, SAMPLE_RATE);
-}
-
-async function sendPacket(text){
-  await ensureCtx();
-  let raw = String(text).trim().replace(/[^0-9]/g,'');
-  if(raw.length < 16) raw = raw.padEnd(16, '0');
-  if(raw.length > 16) raw = raw.slice(0,16);
-  digitsEl.value = raw;
-  log('Sending packet (16 digits):\n' + raw + '\n\nReceiver should be in Listen mode.');
-
-  let t = audioCtx.currentTime + 0.7;
-  // Attention tone
-  const att = toneBuffer(ATT_FREQ, ATT_MS, 0.30);
-  const sAtt = audioCtx.createBufferSource();
-  sAtt.buffer = att;
-  sAtt.connect(audioCtx.destination);
-  sAtt.start(t);
-  t += ATT_MS/1000 + 0.12;  // small gap after attention
-
-  // 16 digits, each tone + gap
-  for(const ch of raw){
-    const f = FREQS[ch];
-    if(!f) continue;
-    const tone = toneBuffer(f, SYMBOL_MS, 0.30);
-    const src = audioCtx.createBufferSource();
-    src.buffer = tone;
-    src.connect(audioCtx.destination);
-    src.start(t);
-    t += SYMBOL_MS/1000;
-    const gap = audioCtx.createBufferSource();
-    gap.buffer = silenceBuffer(GAP_MS);
-    gap.connect(audioCtx.destination);
-    gap.start(t);
-    t += GAP_MS/1000;
-  }
-
-  log('Packet sent (16 digits):\n' + raw + '\n\nReceiver should show final result after a few seconds.');
-}
-
-function goertzel(samples, freq, sr){
-  const k = Math.round(0.5 + samples.length * freq / sr);
-  const w = 2 * Math.PI * k / samples.length;
-  const coeff = 2 * Math.cos(w);
-  let q0=0,q1=0,q2=0;
-  for(const s of samples){
-    q0 = coeff*q1 - q2 + s;
-    q2 = q1;
-    q1 = q0;
-  }
-  return q1*q1 + q2*q2 - coeff*q1*q2;
-}
-
-function detectDigit(samples){
-  // compute overall energy
-  let sum = 0;
-  for(const s of samples) sum += s*s;
-  const totalE = sum / samples.length;
-  if(totalE < 1e-5) return null; // very quiet
-
-  // attention detection
-  const eAtt = goertzel(samples, ATT_FREQ, SAMPLE_RATE);
-
-  // digit detection
-  let bestSym = null;
-  let bestE = 0;
-  for(const ch of SYMBOLS){
-    const f = FREQS[ch];
-    const e = goertzel(samples, f, SAMPLE_RATE);
-    if(e > bestE){ bestE = e; bestSym = ch; }
-  }
-
-  return { totalE, eAtt, bestSym, bestE };
-}
-
-async function listenPacket(){
-  log('Listen clicked.');
-  await ensureCtx();
-
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    log('getUserMedia not supported in this browser/environment.');
-    return;
-  }
-
-  if(listening){
-    log('Already listening.');
-    return;
-  }
-
-  try {
-    micStream = await navigator.mediaDevices.getUserMedia({ audio:true });
-    sourceNode = audioCtx.createMediaStreamSource(micStream);
-    analyser = audioCtx.createAnalyser();
-    analyser.fftSize = 2048;
-    proc = audioCtx.createScriptProcessor(2048, 1, 1);
-    sourceNode.connect(analyser);
-    analyser.connect(proc);
-    proc.connect(audioCtx.destination);
-
-    listening = true;
-    state = 'looking_att';
-    symbolBuffer = '';
-    symbolCount = 0;
-    totalWindows = 0;
-
-    log('Listening for one packet...\n1) Attention tone\n2) Then 16 digits.');
-
-    proc.onaudioprocess = () => {
-      if(!listening) return;
-      const arr = new Float32Array(analyser.fftSize);
-      analyser.getFloatTimeDomainData(arr);
-      const chunkSize = Math.floor(SAMPLE_RATE * WINDOW_MS / 1000);
-
-      for(let i=0;i<arr.length;i+=chunkSize){
-        const chunk = arr.slice(i, i + chunkSize);
-        if(chunk.length < 64) continue;
-        totalWindows++;
-
-        const res = detectDigit(chunk);
-        if(!res) continue;
-        const { totalE, eAtt, bestSym, bestE } = res;
-
-        if(state === 'looking_att'){
-          // strong attention tone required
-          if(eAtt > bestE && eAtt > totalE * 30){
-            state = 'digits';
-            symbolBuffer = '';
-            symbolCount = 0;
-            // start counting windows for digits
-            continue;
-          }
-        } else if(state === 'digits'){
-          // stop after enough windows (e.g., 32 windows ~ few seconds)
-          if(symbolCount >= 16){
-            state = 'done';
-            listening = false;
-            stopListening();
-            log('Final decoded packet (16 digits):\n' + symbolBuffer);
-            return;
-          }
-          // accept digit only when it is clearly above noise and attention
-          if(bestE > totalE * 20 && bestSym){
-            symbolBuffer += bestSym;
-            symbolCount++;
-          }
-        }
-      }
-    };
-
-  } catch (err) {
-    log('Error from getUserMedia:\n' + err.name + ': ' + err.message);
-  }
-}
-
-function stopListening(){
-  listening = false;
-  if(proc){ try{proc.disconnect();}catch(e){} proc = null; }
-  if(sourceNode){ try{sourceNode.disconnect();}catch(e){} sourceNode = null; }
-  if(analyser){ try{analyser.disconnect();}catch(e){} analyser = null; }
-  if(micStream){ micStream.getTracks().forEach(t=>t.stop()); micStream = null; }
-}
-
-async function testMic(){
-  log('Testing mic...');
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    log('getUserMedia not supported here.');
-    return;
-  }
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio:true });
-    log('Mic test: permission OK.');
-    stream.getTracks().forEach(t => t.stop());
-  } catch (err) {
-    log('Mic test error:\n' + err.name + ': ' + err.message);
-  }
-}
-
-sendBtn.onclick = () => { sendPacket(digitsEl.value); };
-listenBtn.onclick = () => { listenPacket(); };
-stopBtn.onclick = () => { stopListening(); log('Stopped.'); };
-testMicBtn.onclick = () => { testMic(); };
-</script>
-</body>
-</html>
+  const length = Math.floor(sampleRate * 
