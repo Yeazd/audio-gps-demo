@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Audio GPS Debug v4</title>
+  <style>
+    :root{color-scheme:dark}
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:920px;margin:18px auto;padding:0 16px;background:#0b1220;color:#e8eefc}
+    .card{background:#111a2e;border:1px solid #24314f;border-radius:16px;padding:16px;margin:14px 0}
+    button,input{font-size:16px;padding:12px 14px;border-radius:12px;border:0}
+    button{background:#4f7cff;color:#fff;font-weight:700;margin-right:8px;margin-top:8px}
+    button.secondary{background:#26324e}
+    input{width:min(100%,460px);background:#0b1220;color:#e8eefc;border:1px solid #2a3550}
+    #log{white-space:pre-wrap;line-height:1.45;background:#08101d;padding:12px;border-radius:12px;min-height:200px}
+    .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+    small{color:#a8b4d6}
+    .pill{display:inline-block;padding:4px 10px;border-radius:999px;background:#17233d;border:1px solid #2a3550;margin-right:6px;margin-top:6px}
+    .meter{height:14px;background:#1c2740;border-radius:999px;overflow:hidden;border:1px solid #2a3550;margin-top:10px}
+    .bar{height:100%;width:0%;background:linear-gradient(90deg,#2ecc71,#f1c40f,#e74c3c)}
+    code{background:#0b1220;padding:2px 6px;border-radius:8px}
+  </style>
+</head>
+<body>
+  <h1>Audio GPS Debug v4</h1>
+  <p>First verify that the receiver hears the sender, then decode the message.</p>
+
+  <div class="card">
+    <div class="row">
+      <input id="coords" value="24.7136,46.6753" placeholder="lat,lon" />
+    </div>
+    <div class="row">
+      <button id="geoBtn">Use my GPS</button>
+      <button id="calBtn">Calibrate</button>
+      <button id="sendBtn">Send location</button>
+      <button id="listenBtn" class="secondary">Listen</button>
+      <button id="stopBtn" class="secondary">Stop</button>
+    </div>
+    <div>
+      <span class="pill">Live mic meter</span>
+      <span class="pill">Tone detection</span>
+      <span class="pill">GPS text</span>
+    </div>
+    <p><small>Open over HTTPS. On the receiving phone, tap Listen first and watch the meter.</small></p>
+  </div>
+
+  <div class="card">
+    <div><strong>Mic level</strong></div>
+    <div class="meter"><div id="meterBar" class="bar"></div></div>
+    <p><small id="toneStatus">Tone status: idle</small></p>
+    <div id="log">Ready.</div>
+  </div>
+
+<script>
+const SAMPLE_RATE = 44100;
+const CAL_FREQ = 1500;
+const FREQ0 = 1000;
+const FREQ1 = 2000;
+const BIT_RATE = 8;
+const BIT_MS = 1000 / BIT_RATE;
+const PREAMBLE_BITS = '1111111111111111111111111111111111111111';
+const START = '10101010';
+const END = '01010101';
+const MAX_LEN = 64;
+const WINDOW_MS = 200;
+const METER_FFT = 2048;
+
+const logEl = document.getElementById('log');
+const coordsEl = document.getElementById('coords');
+const meterBar = document.getElementById('meterBar');
+const toneStatus = document.getElementById('toneStatus');
+const sendBtn = document.getElementById('sendBtn');
+const listenBtn = document.getElementById('listenBtn');
+const stopBtn = document.getElementById('stopBtn');
+const geoBtn = document.getElementById('geoBtn');
+const calBtn = document.getElementById('calBtn');
+
+let audioCtx = null;
+let micStream = null;
+let sourceNode = null;
+let analyser = null;
+let proc = null;
+let listening = false;
+let frameBits = '';
+let lastLevel = 0;
+let detectionOn = false;
+let detectStable = 0;
+let meterTimer = null;
+
+function log(msg){ logEl.textContent = msg; }
+function cleanCoord(s){ return String(s).trim().replace(/\s+/g,''); }
+function validateCoord(s){ return /^-?\d{1,3}\.\d{4},-?\d{1,3}\.\d{4}$/.test(s); }
+function bytesToBits(bytes){ return Array.from(bytes, b => b.toString(2).padStart(8,'0')).join(''); }
+function bitsToBytes(bits){ const out=[]; for(let i=0;i+7<bits.length;i+=8) out.push(parseInt(bits.slice(i,i+8),2)); return new Uint8Array(out); }
+function crc8(str){ let c=0; for(const ch of str){ c ^= ch.charCodeAt(0); c = ((c << 1) | (c >> 7)) & 255; } return c; }
+function buildPayload(text){ const body = cleanCoord(text).slice(0,MAX_LEN); const crc = crc8(body).toString(16).padStart(2,'0').toUpperCase(); return body + '|' + crc; }
+function buildBits(text){ const payload = buildPayload(text); const bits = bytesToBits(new TextEncoder().encode(payload)); return PREAMBLE_BITS + START + bits + END; }
+function ensureCtx(){ if(!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE }); return audioCtx.resume(); }
+function toneBuffer(freq, durMs, amp=0.25){ const len = Math.floor(SAMPLE_RATE * durMs / 1000); const buf = audioCtx.createBuffer(1, len, SAMPLE_RATE); const data = buf.getChannelData(0); for(let i=0;i<len;i++){ const t=i/SAMPLE_RATE; const env = 0.5 - 0.5*Math.cos(2*Math.PI*i/Math.max(1,len-1)); data[i] = Math.sin(2*Math.PI*freq*t) * amp * env; } return buf; }
+function playBuffer(buf, when){ const src = audioCtx.createBufferSource(); src.buffer = buf; src.connect(audioCtx.destination); src.start(when); return src; }
+async function calibrate(){ await ensureCtx(); log('Calibration tones playing...'); const now = audioCtx.currentTime + 0.05; playBuffer(toneBuffer(CAL_FREQ, 700, 0.28), now); playBuffer(toneBuffer(CAL_FREQ, 700, 0.28), now + 0.85); playBuffer(toneBuffer(CAL_FREQ, 700, 0.28), now + 1.70); log('Calibration done. On the receiver, the level meter should move.'); }
+async function sendAudio(text){ await ensureCtx(); const payload = cleanCoord(text); if(!validateCoord(payload)){ log('Enter coordinates like 24.7136,46.6753'); return; } const bits = buildBits(payload); log('Sending:\n' + payload + '\n\nWait 1 second...'); let t = audioCtx.currentTime + 1.0; playBuffer(toneBuffer(CAL_FREQ, 800, 0.28), t); t += 1.0; for(const bit of bits){ playBuffer(toneBuffer(bit === '1' ? FREQ1 : FREQ0, BIT_MS, 0.24), t); t += BIT_MS/1000; } playBuffer(toneBuffer(CAL_FREQ, 800, 0.28), t); log('Sent. On the receiver, watch for the meter and tone status.'); }
+function goertzel(samples, freq, sr){ const k = Math.round(0.5 + samples.length * freq / sr); const w = 2 * Math.PI * k / samples.length; const coeff = 2 * Math.cos(w); let q0=0,q1=0,q2=0; for(const s of samples){ q0 = coeff*q1 - q2 + s; q2 = q1; q1 = q0; } return q1*q1 + q2*q2 - coeff*q1*q2; }
+function micLevel(arr){ let sum=0; for(let i=0;i<arr.length;i++) sum += arr[i]*arr[i]; return Math.sqrt(sum / arr.length); }
+function bitFromWindow(samples){ const e0 = goertzel(samples, FREQ0, SAMPLE_RATE); const e1 = goertzel(samples, FREQ1, SAMPLE_RATE); const ec = goertzel(samples, CAL_FREQ, SAMPLE_RATE); const max = Math.max(e0,e1,ec); if(max < 0.00001) return '?'; if(ec === max) return 'C'; if(e1 > e0*1.12) return '1'; if(e0 > e1*1.12) return '0'; return '?'; }
+function decodeBitsToResult(bits){ const startMarker = PREAMBLE_BITS + START; const start = bits.indexOf(startMarker); if(start < 0) return null; const after = start + startMarker.length; const end = bits.indexOf(END, after); if(end < 0) return null; const payloadBits = bits.slice(after, end).replace(/\?/g,''); if(payloadBits.length < 32) return null; const text = new TextDecoder().decode(bitsToBytes(payloadBits)).replace(/\0/g,'').trim(); const sep = text.lastIndexOf('|'); if(sep < 0) return { ok:false, reason:'missing checksum', raw:text }; const body = text.slice(0, sep); const crc = text.slice(sep+1).trim().toUpperCase(); const good = crc8(body).toString(16).padStart(2,'0').toUpperCase() === crc; return good ? { ok:true, text: body } : { ok:false, reason:'checksum failed', raw:text }; }
+function updateMeter(level){ const pct = Math.min(100, Math.max(0, level * 2500)); meterBar.style.width = pct.toFixed(1) + '%'; }
+async function listen(){ await ensureCtx(); if(listening) return; micStream = await navigator.mediaDevices.getUserMedia({ audio:true }); sourceNode = audioCtx.createMediaStreamSource(micStream); analyser = audioCtx.createAnalyser(); analyser.fftSize = METER_FFT; proc = audioCtx.createScriptProcessor(METER_FFT, 1, 1); sourceNode.connect(analyser); analyser.connect(proc); proc.connect(audioCtx.destination); listening = true; frameBits = ''; detectionOn = false; detectStable = 0; log('Listening...\nTap Send location on the other phone.'); toneStatus.textContent = 'Tone status: waiting for signal'; proc.onaudioprocess = () => { if(!listening) return; const timeArr = new Float32Array(analyser.fftSize); analyser.getFloatTimeDomainData(timeArr); const level = micLevel(timeArr); lastLevel = level; updateMeter(level); const chunkSize = Math.floor(SAMPLE_RATE * WINDOW_MS / 1000); for(let i=0;i<timeArr.length;i+=chunkSize){ const chunk = timeArr.slice(i, i + chunkSize); if(chunk.length < 64) continue; const bit = bitFromWindow(chunk); if(bit === 'C'){ toneStatus.textContent = 'Tone status: calibration tone heard'; detectionOn = false; detectStable = 0; continue; } if(bit === '?') continue; frameBits += bit; if(frameBits.length > 12000) frameBits = frameBits.slice(-12000); const res = decodeBitsToResult(frameBits); if(res && res.ok){ toneStatus.textContent = 'Tone status: packet decoded'; log('Decoded location:\n' + res.text); stopListening(); return; } if(res && !res.ok) toneStatus.textContent = 'Tone status: signal found, but checksum failed'; if(frameBits.endsWith(PREAMBLE_BITS + START)) toneStatus.textContent = 'Tone status: preamble detected'; }
+  };
+  meterTimer = setInterval(() => { if(!listening) return; toneStatus.textContent = 'Tone status: live level ' + lastLevel.toFixed(4) + ' / wait for tones'; }, 700);
+}
+function stopListening(){ listening = false; if(meterTimer){ clearInterval(meterTimer); meterTimer = null; } if(proc){ try{proc.disconnect();}catch(e){} proc = null; } if(sourceNode){ try{sourceNode.disconnect();}catch(e){} sourceNode = null; } if(analyser){ try{analyser.disconnect();}catch(e){} analyser = null; } if(micStream){ micStream.getTracks().forEach(t=>t.stop()); micStream = null; } toneStatus.textContent = 'Tone status: stopped'; }
+async function useMyGps(){ if(!navigator.geolocation){ log('Geolocation not supported.'); return; } log('Requesting GPS permission...'); navigator.geolocation.getCurrentPosition(pos => { const lat = pos.coords.latitude.toFixed(4); const lon = pos.coords.longitude.toFixed(4); coordsEl.value = `${lat},${lon}`; log('GPS loaded:\n' + coordsEl.value + '\n\nTap Send location.'); }, err => { log('GPS error: ' + err.message + '\n\nYou can still type coordinates manually.'); }, {enableHighAccuracy:true, timeout:7000, maximumAge:0}); }
+geoBtn.onclick = useMyGps;
+calBtn.onclick = async () => { try { await calibrate(); } catch(e){ log('Calibrate error: ' + e.message); } };
+sendBtn.onclick = async () => { try { await sendAudio(coordsEl.value); } catch(e){ log('Send error: ' + e.message); } };
+listenBtn.onclick = async () => { try { await listen(); } catch(e){ log('Listen error: ' + e.message); stopListening(); } };
+stopBtn.onclick = () => { stopListening(); log('Stopped.'); };
+</script>
+</body>
+</html>
