@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DTMF GPS Packet v1</title>
+  <style>
+    :root{color-scheme:dark}
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:700px;margin:20px auto;padding:0 16px;background:#0b1220;color:#e8eefc}
+    button,input{font-size:16px;padding:10px 12px;border-radius:10px;border:0}
+    button{background:#4f7cff;color:#fff;font-weight:600;margin-right:8px;margin-top:8px}
+    button.secondary{background:#26324e}
+    input{width:100%;background:#0b1220;color:#e8eefc;border:1px solid #2a3550;margin-top:8px}
+    #log{white-space:pre-wrap;line-height:1.45;background:#08101d;padding:10px;border-radius:10px;min-height:140px;margin-top:10px}
+  </style>
+</head>
+<body>
+  <h1>DTMF GPS Packet v1</h1>
+  <p>Fixed-length packet: attention tone + 16 digits. Receiver only decodes inside that window.</p>
+
+  <div>
+    <label>16-digit payload (only 0-9):</label>
+    <input id="digits" value="2471364667531234" />
+    <div>
+      <button id="sendBtn">Send packet</button>
+      <button id="listenBtn" class="secondary">Listen for one packet</button>
+      <button id="stopBtn" class="secondary">Stop</button>
+      <button id="testMicBtn" class="secondary">Test mic</button>
+    </div>
+  </div>
+
+  <pre id="log">Ready.</pre>
+
+<script>
+const SAMPLE_RATE = 44100;
+const SYMBOL_MS = 160;  // per digit tone
+const GAP_MS = 60;      // silence between digits
+const ATT_MS = 800;     // attention tone length
+const WINDOW_MS = 160;  // analysis window = symbol length
+
+const SYMBOLS = '0123456789';
+const FREQS = {
+  '0': 700,
+  '1': 900,
+  '2': 1100,
+  '3': 1300,
+  '4': 1500,
+  '5': 1700,
+  '6': 1900,
+  '7': 2100,
+  '8': 2300,
+  '9': 2500
+};
+const ATT_FREQ = 1000;  // attention tone frequency
+
+const logEl = document.getElementById('log');
+const digitsEl = document.getElementById('digits');
+const sendBtn = document.getElementById('sendBtn');
+const listenBtn = document.getElementById('listenBtn');
+const stopBtn = document.getElementById('stopBtn');
+const testMicBtn = document.getElementById('testMicBtn');
+
+let audioCtx = null;
+let micStream = null;
+let analyser = null;
+let sourceNode = null;
+let proc = null;
+let listening = false;
+let state = 'idle';  // 'idle' | 'looking_att' | 'digits' | 'done'
+let symbolBuffer = '';
+let symbolCount = 0;
+let totalWindows = 0;
+
+function log(msg){ logEl.textContent = msg; }
+
+function ensureCtx(){
+  if(!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
+  return audioCtx.resume();
+}
+
+function toneBuffer(freq, ms, amp=0.25){
+  const len = Math.floor(SAMPLE_RATE * ms / 1000);
+  const buf = audioCtx.createBuffer(1, len, SAMPLE_RATE);
+  const data = buf.getChannelData(0);
+  for(let i=0;i<len;i++){
+    const t=i/SAMPLE_RATE;
+    const env = 0.5 - 0.5*Math.cos(2*Math.PI*i/Math.max(1,len-1));
+    data[i] = Math.sin(2*Math.PI*freq*t) * amp * env;
+  }
+  return buf;
+}
+
+function silenceBuffer(ms){
+  const len = Math.floor(SAMPLE_RATE * ms / 1000);
+  return audioCtx.createBuffer(1, len, SAMPLE_RATE);
+}
+
+async function sendPacket(text){
+  await ensureCtx();
+  let raw = String(text).trim().replace(/[^0-9]/g,'');
+  if(raw.length < 16) raw = raw.padEnd(16, '0');
+  if(raw.length > 16) raw = raw.slice(0,16);
+  digitsEl.value = raw;
+  log('Sending packet (16 digits):\n' + raw + '\n\nReceiver should be in Listen mode.');
+
+  let t = audioCtx.currentTime + 0.7;
+  // Attention tone
+  const att = toneBuffer(ATT_FREQ, ATT_MS, 0.30);
+  const sAtt = audioCtx.createBufferSource();
+  sAtt.buffer = att;
+  sAtt.connect(audioCtx.destination);
+  sAtt.start(t);
+  t += ATT_MS/1000 + 0.12;  // small gap after attention
+
+  // 16 digits, each tone + gap
+  for(const ch of raw){
+    const f = FREQS[ch];
+    if(!f) continue;
+    const tone = toneBuffer(f, SYMBOL_MS, 0.30);
+    const src = audioCtx.createBufferSource();
+    src.buffer = tone;
+    src.connect(audioCtx.destination);
+    src.start(t);
+    t += SYMBOL_MS/1000;
+    const gap = audioCtx.createBufferSource();
+    gap.buffer = silenceBuffer(GAP_MS);
+    gap.connect(audioCtx.destination);
+    gap.start(t);
+    t += GAP_MS/1000;
+  }
+
+  log('Packet sent (16 digits):\n' + raw + '\n\nReceiver should show final result after a few seconds.');
+}
+
+function goertzel(samples, freq, sr){
+  const k = Math.round(0.5 + samples.length * freq / sr);
+  const w = 2 * Math.PI * k / samples.length;
+  const coeff = 2 * Math.cos(w);
+  let q0=0,q1=0,q2=0;
+  for(const s of samples){
+    q0 = coeff*q1 - q2 + s;
+    q2 = q1;
+    q1 = q0;
+  }
+  return q1*q1 + q2*q2 - coeff*q1*q2;
+}
+
+function detectDigit(samples){
+  // compute overall energy
+  let sum = 0;
+  for(const s of samples) sum += s*s;
+  const totalE = sum / samples.length;
+  if(totalE < 1e-5) return null; // very quiet
+
+  // attention detection
+  const eAtt = goertzel(samples, ATT_FREQ, SAMPLE_RATE);
+
+  // digit detection
+  let bestSym = null;
+  let bestE = 0;
+  for(const ch of SYMBOLS){
+    const f = FREQS[ch];
+    const e = goertzel(samples, f, SAMPLE_RATE);
+    if(e > bestE){ bestE = e; bestSym = ch; }
+  }
+
+  return { totalE, eAtt, bestSym, bestE };
+}
+
+async function listenPacket(){
+  log('Listen clicked.');
+  await ensureCtx();
+
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    log('getUserMedia not supported in this browser/environment.');
+    return;
+  }
+
+  if(listening){
+    log('Already listening.');
+    return;
+  }
+
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio:true });
+    sourceNode = audioCtx.createMediaStreamSource(micStream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 2048;
+    proc = audioCtx.createScriptProcessor(2048, 1, 1);
+    sourceNode.connect(analyser);
+    analyser.connect(proc);
+    proc.connect(audioCtx.destination);
+
+    listening = true;
+    state = 'looking_att';
+    symbolBuffer = '';
+    symbolCount = 0;
+    totalWindows = 0;
+
+    log('Listening for one packet...\n1) Attention tone\n2) Then 16 digits.');
+
+    proc.onaudioprocess = () => {
+      if(!listening) return;
+      const arr = new Float32Array(analyser.fftSize);
+      analyser.getFloatTimeDomainData(arr);
+      const chunkSize = Math.floor(SAMPLE_RATE * WINDOW_MS / 1000);
+
+      for(let i=0;i<arr.length;i+=chunkSize){
+        const chunk = arr.slice(i, i + chunkSize);
+        if(chunk.length < 64) continue;
+        totalWindows++;
+
+        const res = detectDigit(chunk);
+        if(!res) continue;
+        const { totalE, eAtt, bestSym, bestE } = res;
+
+        if(state === 'looking_att'){
+          // strong attention tone required
+          if(eAtt > bestE && eAtt > totalE * 30){
+            state = 'digits';
+            symbolBuffer = '';
+            symbolCount = 0;
+            // start counting windows for digits
+            continue;
+          }
+        } else if(state === 'digits'){
+          // stop after enough windows (e.g., 32 windows ~ few seconds)
+          if(symbolCount >= 16){
+            state = 'done';
+            listening = false;
+            stopListening();
+            log('Final decoded packet (16 digits):\n' + symbolBuffer);
+            return;
+          }
+          // accept digit only when it is clearly above noise and attention
+          if(bestE > totalE * 20 && bestSym){
+            symbolBuffer += bestSym;
+            symbolCount++;
+          }
+        }
+      }
+    };
+
+  } catch (err) {
+    log('Error from getUserMedia:\n' + err.name + ': ' + err.message);
+  }
+}
+
+function stopListening(){
+  listening = false;
+  if(proc){ try{proc.disconnect();}catch(e){} proc = null; }
+  if(sourceNode){ try{sourceNode.disconnect();}catch(e){} sourceNode = null; }
+  if(analyser){ try{analyser.disconnect();}catch(e){} analyser = null; }
+  if(micStream){ micStream.getTracks().forEach(t=>t.stop()); micStream = null; }
+}
+
+async function testMic(){
+  log('Testing mic...');
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    log('getUserMedia not supported here.');
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio:true });
+    log('Mic test: permission OK.');
+    stream.getTracks().forEach(t => t.stop());
+  } catch (err) {
+    log('Mic test error:\n' + err.name + ': ' + err.message);
+  }
+}
+
+sendBtn.onclick = () => { sendPacket(digitsEl.value); };
+listenBtn.onclick = () => { listenPacket(); };
+stopBtn.onclick = () => { stopListening(); log('Stopped.'); };
+testMicBtn.onclick = () => { testMic(); };
+</script>
+</body>
+</html>
