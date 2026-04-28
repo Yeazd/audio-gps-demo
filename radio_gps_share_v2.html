@@ -1,0 +1,554 @@
+
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:var(--font-sans);color:var(--color-text-primary)}
+.app{padding:1rem 0;max-width:680px}
+.header{text-align:center;margin-bottom:1.5rem}
+.header h2{font-size:18px;font-weight:500;margin-bottom:4px}
+.header p{font-size:13px;color:var(--color-text-secondary)}
+.tabs{display:flex;gap:6px;margin-bottom:1.25rem;background:var(--color-background-secondary);border-radius:var(--border-radius-md);padding:4px}
+.tab{flex:1;padding:8px 4px;font-size:13px;font-weight:500;border:none;background:transparent;border-radius:6px;cursor:pointer;color:var(--color-text-secondary);transition:all .15s}
+.tab.active{background:var(--color-background-primary);color:var(--color-text-primary);border:0.5px solid var(--color-border-tertiary)}
+.card{background:var(--color-background-primary);border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-lg);padding:1rem 1.25rem;margin-bottom:1rem}
+.section-label{font-size:11px;font-weight:500;color:var(--color-text-secondary);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px}
+.coords{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:1rem}
+.coord-box{background:var(--color-background-secondary);border-radius:var(--border-radius-md);padding:10px 12px}
+.coord-box label{font-size:11px;color:var(--color-text-secondary);display:block;margin-bottom:2px}
+.coord-box span{font-size:16px;font-weight:500;font-family:var(--font-mono)}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:10px 18px;border-radius:var(--border-radius-md);border:0.5px solid var(--color-border-secondary);background:transparent;color:var(--color-text-primary);font-size:14px;font-weight:500;cursor:pointer;transition:all .15s;width:100%;margin-bottom:8px}
+.btn:hover{background:var(--color-background-secondary)}
+.btn:active{transform:scale(0.98)}
+.btn.primary{background:#185FA5;color:#fff;border-color:#185FA5}
+.btn.primary:hover{background:#0C447C}
+.btn.danger{background:#A32D2D;color:#fff;border-color:#A32D2D}
+.btn.danger:hover{background:#791F1F}
+.btn.success{background:#3B6D11;color:#fff;border-color:#3B6D11}
+.btn.success:hover{background:#27500A}
+.btn:disabled{opacity:.4;cursor:not-allowed;transform:none}
+.status{font-size:13px;color:var(--color-text-secondary);text-align:center;padding:8px;min-height:36px}
+.status.active{color:#185FA5;font-weight:500}
+.status.error{color:#A32D2D}
+.mode-panel{display:none}
+.mode-panel.visible{display:block}
+.rx-area{min-height:44px;background:var(--color-background-secondary);border-radius:var(--border-radius-md);padding:10px 12px;font-family:var(--font-mono);font-size:13px;margin-bottom:8px;word-break:break-all}
+.divider{height:0.5px;background:var(--color-border-tertiary);margin:1rem 0}
+.row{display:flex;gap:8px}
+.row .btn{flex:1}
+.info-row{display:flex;justify-content:space-between;font-size:12px;color:var(--color-text-secondary);margin-bottom:6px}
+input[type=text]{width:100%;padding:8px 10px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary);font-family:var(--font-mono);font-size:13px;margin-bottom:8px}
+select{width:100%;padding:8px 10px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary);font-size:13px;margin-bottom:8px}
+.meter-wrap{height:6px;background:var(--color-background-secondary);border-radius:3px;margin-bottom:10px;overflow:hidden}
+.meter-fill{height:100%;border-radius:3px;transition:width .08s;width:0%}
+.meter-fill.green{background:#3B6D11}
+.meter-fill.amber{background:#BA7517}
+.meter-fill.red{background:#A32D2D}
+.prog-wrap{height:4px;background:var(--color-background-secondary);border-radius:2px;overflow:hidden;margin:6px 0}
+.prog-fill{height:100%;background:#185FA5;border-radius:2px;transition:width .1s;width:0%}
+</style>
+
+<div class="app">
+<div class="header">
+  <h2>Radio GPS Share</h2>
+  <p>Send your location over any radio using only your phone's speaker and mic</p>
+</div>
+
+<div class="card">
+  <div class="section-label">Your location</div>
+  <div class="coords">
+    <div class="coord-box"><label>Latitude</label><span id="lat-disp">—</span></div>
+    <div class="coord-box"><label>Longitude</label><span id="lon-disp">—</span></div>
+  </div>
+  <button class="btn" onclick="getLocation()">Get my GPS location</button>
+  <div class="status" id="gps-status">Tap above to get coordinates</div>
+</div>
+
+<div class="tabs">
+  <button class="tab active" onclick="setMode('dtmf',this)">DTMF</button>
+  <button class="tab" onclick="setMode('morse',this)">Morse</button>
+  <button class="tab" onclick="setMode('afsk',this)">AFSK</button>
+</div>
+
+<div class="card">
+
+  <!-- DTMF -->
+  <div id="panel-dtmf" class="mode-panel visible">
+    <div class="section-label">DTMF — fast, simple</div>
+    <div class="info-row"><span>Dual-tone bursts, one digit at a time</span><span>~3 sec for 15 digits</span></div>
+    <div class="prog-wrap"><div class="prog-fill" id="dtmf-prog"></div></div>
+    <div class="status" id="dtmf-status">Ready</div>
+    <button class="btn primary" id="dtmf-tx-btn" onclick="transmitDTMF()" disabled>Transmit location</button>
+    <div class="divider"></div>
+    <div class="section-label">Receive</div>
+    <p style="font-size:12px;color:var(--color-text-secondary);margin-bottom:8px">Hold phone mic near radio speaker, then press Listen.</p>
+    <div class="section-label" style="margin-bottom:4px">Signal level</div>
+    <div class="meter-wrap"><div class="meter-fill green" id="dtmf-meter"></div></div>
+    <div class="row">
+      <button class="btn success" id="dtmf-rx-btn" onclick="startDTMFRx()">Listen for DTMF</button>
+      <button class="btn danger" id="dtmf-rx-stop" onclick="stopRx()" disabled>Stop</button>
+    </div>
+    <div class="rx-area" id="dtmf-rx-out">Decoded digits will appear here...</div>
+    <div id="dtmf-decoded-coords" style="display:none" class="coords">
+      <div class="coord-box"><label>Latitude</label><span id="dtmf-lat">—</span></div>
+      <div class="coord-box"><label>Longitude</label><span id="dtmf-lon">—</span></div>
+    </div>
+  </div>
+
+  <!-- Morse -->
+  <div id="panel-morse" class="mode-panel">
+    <div class="section-label">Morse code — human readable</div>
+    <div class="info-row"><span>Standard ITU Morse, one digit at a time</span><span>~10 sec for 15 digits</span></div>
+    <div class="prog-wrap"><div class="prog-fill" id="morse-prog"></div></div>
+    <div class="status" id="morse-status">Ready</div>
+    <div class="rx-area" id="morse-preview" style="font-size:12px;min-height:36px;margin-bottom:8px">Morse preview appears after getting GPS</div>
+    <button class="btn primary" id="morse-tx-btn" onclick="transmitMorse()" disabled>Transmit location</button>
+    <div class="divider"></div>
+    <div class="section-label">Decode manually</div>
+    <p style="font-size:12px;color:var(--color-text-secondary);margin-bottom:8px">Listen and type the digits you hear (numbers only):</p>
+    <input type="text" id="morse-manual" placeholder="e.g. 124371234321234" oninput="decodeMorseManual()">
+    <div id="morse-decoded-coords" style="display:none" class="coords">
+      <div class="coord-box"><label>Latitude</label><span id="morse-lat">—</span></div>
+      <div class="coord-box"><label>Longitude</label><span id="morse-lon">—</span></div>
+    </div>
+  </div>
+
+  <!-- AFSK -->
+  <div id="panel-afsk" class="mode-panel">
+    <div class="section-label">AFSK — most reliable</div>
+    <div class="info-row"><span>Bell 202 audio FSK (1200/2200 Hz)</span><span>~2 sec at 1200 baud</span></div>
+    <select id="afsk-baud">
+      <option value="300">300 baud (slow, very resilient)</option>
+      <option value="1200" selected>1200 baud (standard APRS)</option>
+    </select>
+    <div class="prog-wrap"><div class="prog-fill" id="afsk-prog"></div></div>
+    <div class="status" id="afsk-status">Ready</div>
+    <button class="btn primary" id="afsk-tx-btn" onclick="transmitAFSK()" disabled>Transmit location</button>
+    <div class="divider"></div>
+    <div class="section-label">Receive</div>
+    <p style="font-size:12px;color:var(--color-text-secondary);margin-bottom:8px">Hold phone mic near radio speaker, then press Listen.</p>
+    <div class="section-label" style="margin-bottom:4px">Signal level</div>
+    <div class="meter-wrap"><div class="meter-fill green" id="afsk-meter"></div></div>
+    <div class="row">
+      <button class="btn success" id="afsk-rx-btn" onclick="startAFSKRx()">Listen for AFSK</button>
+      <button class="btn danger" id="afsk-rx-stop" onclick="stopRx()" disabled>Stop</button>
+    </div>
+    <div class="rx-area" id="afsk-rx-out">Decoded data will appear here...</div>
+    <div id="afsk-decoded-coords" style="display:none" class="coords">
+      <div class="coord-box"><label>Latitude</label><span id="afsk-lat">—</span></div>
+      <div class="coord-box"><label>Longitude</label><span id="afsk-lon">—</span></div>
+    </div>
+  </div>
+
+</div>
+
+<div class="card" style="font-size:12px;color:var(--color-text-secondary);line-height:1.8">
+  <strong style="font-size:13px;color:var(--color-text-primary)">How to use</strong><br>
+  <strong>TX:</strong> Get GPS → Transmit → PTT radio first, then hold phone speaker near radio mic<br>
+  <strong>RX:</strong> Press Listen → place phone mic near radio speaker → key remote station<br>
+  Format: <code style="font-family:var(--font-mono)">S + 6 lat digits + S + 7 lon digits</code> (S = sign bit, 0/1 for lat, 2/3 for lon)
+</div>
+</div>
+
+<script>
+let lat=null,lon=null;
+let audioCtx=null;
+let rxStream=null;
+let isTransmitting=false;
+let isReceiving=false;
+let animFrame=null;
+
+function getAudioCtx(){
+  if(!audioCtx||audioCtx.state==='closed') audioCtx=new(window.AudioContext||window.webkitAudioContext)();
+  return audioCtx;
+}
+function setMode(m,btn){
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  btn.classList.add('active');
+  document.querySelectorAll('.mode-panel').forEach(p=>p.classList.remove('visible'));
+  document.getElementById('panel-'+m).classList.add('visible');
+}
+function getLocation(){
+  const s=document.getElementById('gps-status');
+  s.textContent='Getting location...';s.className='status active';
+  if(!navigator.geolocation){s.textContent='Geolocation not supported';s.className='status error';return;}
+  navigator.geolocation.getCurrentPosition(pos=>{
+    lat=pos.coords.latitude;lon=pos.coords.longitude;
+    document.getElementById('lat-disp').textContent=lat.toFixed(6);
+    document.getElementById('lon-disp').textContent=lon.toFixed(6);
+    s.textContent='Location acquired';s.className='status';
+    ['dtmf','morse','afsk'].forEach(m=>document.getElementById(m+'-tx-btn').disabled=false);
+    updateMorsePreview();
+  },err=>{s.textContent='Error: '+err.message;s.className='status error';},{enableHighAccuracy:true,timeout:10000});
+}
+function encodeCoords(la,lo){
+  const latSign=la>=0?'1':'0';
+  const lonSign=lo>=0?'3':'2';
+  const latStr=Math.round(Math.abs(la)*10000).toString().padStart(6,'0');
+  const lonStr=Math.round(Math.abs(lo)*10000).toString().padStart(7,'0');
+  return latSign+latStr+lonSign+lonStr;
+}
+function decodePayload(s){
+  s=s.replace(/[^0-9]/g,'');
+  if(s.length<15) return null;
+  s=s.slice(-15);
+  try{
+    const latSign=s[0]==='1'?1:-1;
+    const latVal=parseInt(s.slice(1,7))/10000;
+    const lonSign=s[7]==='3'?1:-1;
+    const lonVal=parseInt(s.slice(8,15))/10000;
+    if(isNaN(latVal)||isNaN(lonVal)) return null;
+    const la=latSign*latVal,lo=lonSign*lonVal;
+    if(Math.abs(la)>90||Math.abs(lo)>180) return null;
+    return{lat:la.toFixed(6),lon:lo.toFixed(6)};
+  }catch(e){return null;}
+}
+const MORSE={'0':'-----','1':'.----','2':'..---','3':'...--','4':'....-','5':'.....','6':'-....','7':'--...','8':'---..','9':'----.'};
+function updateMorsePreview(){
+  if(lat===null)return;
+  const payload=encodeCoords(lat,lon);
+  const morse=payload.split('').map(c=>MORSE[c]||'').join(' / ');
+  document.getElementById('morse-preview').textContent=payload+'\n'+morse;
+}
+function decodeMorseManual(){
+  const digits=document.getElementById('morse-manual').value.replace(/[^0-9]/g,'');
+  const r=decodePayload(digits);
+  if(r){
+    document.getElementById('morse-decoded-coords').style.display='grid';
+    document.getElementById('morse-lat').textContent=r.lat;
+    document.getElementById('morse-lon').textContent=r.lon;
+  } else {
+    document.getElementById('morse-decoded-coords').style.display='none';
+  }
+}
+
+async function playTone(ctx,freq1,freq2,dur,vol=0.5){
+  return new Promise(res=>{
+    const t=ctx.currentTime;
+    const g=ctx.createGain();
+    g.gain.setValueAtTime(vol,t);
+    g.gain.linearRampToValueAtTime(0,t+dur);
+    g.connect(ctx.destination);
+    [freq1,freq2].filter(Boolean).forEach(f=>{
+      const o=ctx.createOscillator();o.frequency.value=f;o.connect(g);o.start(t);o.stop(t+dur+0.01);
+    });
+    setTimeout(res,(dur*1000)+30);
+  });
+}
+
+const DTMF_FREQS={'1':[697,1209],'2':[697,1336],'3':[697,1477],'4':[770,1209],'5':[770,1336],'6':[770,1477],'7':[852,1209],'8':[852,1336],'9':[852,1477],'0':[941,1336]};
+
+async function transmitDTMF(){
+  if(isTransmitting||lat===null)return;
+  isTransmitting=true;
+  const payload=encodeCoords(lat,lon);
+  const btn=document.getElementById('dtmf-tx-btn');
+  const st=document.getElementById('dtmf-status');
+  const prog=document.getElementById('dtmf-prog');
+  btn.disabled=true;st.textContent='Transmitting...';st.className='status active';
+  const ctx=getAudioCtx();
+  for(let i=0;i<payload.length;i++){
+    const ch=payload[i];
+    const freqs=DTMF_FREQS[ch]||[697,1209];
+    prog.style.width=Math.round((i/payload.length)*100)+'%';
+    st.textContent='Sending digit '+(i+1)+'/'+payload.length+' ('+ch+')';
+    await playTone(ctx,freqs[0],freqs[1],0.15);
+    await new Promise(r=>setTimeout(r,80));
+  }
+  prog.style.width='100%';
+  st.textContent='Done! '+payload.length+' digits sent.';st.className='status';
+  setTimeout(()=>{prog.style.width='0%';},1500);
+  isTransmitting=false;btn.disabled=false;
+}
+
+async function transmitMorse(){
+  if(isTransmitting||lat===null)return;
+  isTransmitting=true;
+  const payload=encodeCoords(lat,lon);
+  const btn=document.getElementById('morse-tx-btn');
+  const st=document.getElementById('morse-status');
+  const prog=document.getElementById('morse-prog');
+  btn.disabled=true;st.className='status active';
+  const ctx=getAudioCtx();
+  const dit=0.07;
+  for(let i=0;i<payload.length;i++){
+    const ch=payload[i];
+    const code=MORSE[ch]||'';
+    prog.style.width=Math.round((i/payload.length)*100)+'%';
+    st.textContent='Sending '+ch+' ('+code+')';
+    for(const sym of code){
+      const dur=sym==='.'?dit:dit*3;
+      await playTone(ctx,700,null,dur,0.65);
+      await new Promise(r=>setTimeout(r,dit*1000));
+    }
+    await new Promise(r=>setTimeout(r,dit*3*1000));
+  }
+  prog.style.width='100%';
+  st.textContent='Done!';st.className='status';
+  setTimeout(()=>{prog.style.width='0%';},1500);
+  isTransmitting=false;btn.disabled=false;
+}
+
+async function transmitAFSK(){
+  if(isTransmitting||lat===null)return;
+  isTransmitting=true;
+  const payload=encodeCoords(lat,lon);
+  const baud=parseInt(document.getElementById('afsk-baud').value);
+  const bitDur=1/baud;
+  const MARK=1200,SPACE=2200;
+  const btn=document.getElementById('afsk-tx-btn');
+  const st=document.getElementById('afsk-status');
+  const prog=document.getElementById('afsk-prog');
+  btn.disabled=true;st.textContent='Transmitting AFSK @ '+baud+' baud...';st.className='status active';
+  const ctx=getAudioCtx();
+  const bytes=[];
+  for(const ch of payload) bytes.push(ch.charCodeAt(0));
+  const totalBits=bytes.length*10;let bitCount=0;
+  async function sendByte(b){
+    await playTone(ctx,SPACE,null,bitDur,0.7);
+    for(let i=0;i<8;i++){
+      const bit=(b>>i)&1;
+      await playTone(ctx,bit?MARK:SPACE,null,bitDur,0.7);
+      bitCount++;
+      prog.style.width=Math.round((bitCount/totalBits)*100)+'%';
+    }
+    await playTone(ctx,MARK,null,bitDur,0.7);
+  }
+  await playTone(ctx,MARK,null,0.4,0.7);
+  for(const b of bytes) await sendByte(b);
+  await playTone(ctx,MARK,null,0.15,0.7);
+  prog.style.width='100%';
+  st.textContent='Done! '+payload.length+' chars sent.';st.className='status';
+  setTimeout(()=>{prog.style.width='0%';},1500);
+  isTransmitting=false;btn.disabled=false;
+}
+
+/* ── DTMF RECEIVER ── */
+function startDTMFRx(){
+  if(isReceiving)return;
+  const outEl=document.getElementById('dtmf-rx-out');
+  const st=document.getElementById('dtmf-status');
+  const meterEl=document.getElementById('dtmf-meter');
+  document.getElementById('dtmf-rx-btn').disabled=true;
+  document.getElementById('dtmf-rx-stop').disabled=false;
+  outEl.textContent='Listening — waiting for tones...';
+  st.textContent='Mic active. Hold phone near radio speaker.';st.className='status active';
+  isReceiving=true;
+  navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}}).then(stream=>{
+    rxStream=stream;
+    const ctx=getAudioCtx();
+    const src=ctx.createMediaStreamSource(stream);
+    const analyser=ctx.createAnalyser();
+    analyser.fftSize=2048;
+    src.connect(analyser);
+    const N=analyser.fftSize;
+    const buf=new Float32Array(N);
+    const rowFreqs=[697,770,852,941];
+    const colFreqs=[1209,1336,1477];
+    const dtmfMap=[['1','2','3'],['4','5','6'],['7','8','9'],['*','0','#']];
+    let decoded='';
+    let lastDigit='';
+    let lastDigitTime=0;
+    let silenceCount=0;
+    let digitLatch='';
+
+    function goertzel(freq,samples,sr){
+      const k=Math.round(freq*N/sr);
+      const w=2*Math.PI*k/N;
+      const coeff=2*Math.cos(w);
+      let s0=0,s1=0,s2=0;
+      for(let i=0;i<samples.length;i++){s0=samples[i]+coeff*s1-s2;s2=s1;s1=s0;}
+      return s1*s1+s2*s2-coeff*s1*s2;
+    }
+
+    function rms(samples){
+      let sum=0;for(let i=0;i<samples.length;i++) sum+=samples[i]*samples[i];
+      return Math.sqrt(sum/samples.length);
+    }
+
+    function loop(){
+      if(!isReceiving)return;
+      analyser.getFloatTimeDomainData(buf);
+      const sr=ctx.sampleRate;
+      const level=rms(buf);
+
+      // Update level meter
+      const meterPct=Math.min(100,Math.round(level*600));
+      meterEl.style.width=meterPct+'%';
+      meterEl.className='meter-fill '+(meterPct<20?'green':meterPct<60?'amber':'red');
+
+      // Hard noise gate — ignore frames below this level
+      const NOISE_GATE=0.012;
+      if(level<NOISE_GATE){
+        silenceCount++;
+        if(silenceCount>3&&digitLatch){
+          // confirmed end of tone
+          const now=Date.now();
+          if(digitLatch!==lastDigit||(now-lastDigitTime)>300){
+            lastDigit=digitLatch;lastDigitTime=now;
+            decoded+=digitLatch;
+            outEl.textContent='Decoded: '+decoded;
+            st.textContent='Receiving... ('+decoded.length+'/15)';
+            if(decoded.length>=15){
+              const r=decodePayload(decoded);
+              if(r){
+                document.getElementById('dtmf-decoded-coords').style.display='grid';
+                document.getElementById('dtmf-lat').textContent=r.lat;
+                document.getElementById('dtmf-lon').textContent=r.lon;
+                st.textContent='Done! Lat:'+r.lat+' Lon:'+r.lon;st.className='status';
+                stopRx();return;
+              }
+            }
+          }
+          digitLatch='';
+        }
+        animFrame=requestAnimationFrame(loop);return;
+      }
+      silenceCount=0;
+
+      const rowMags=rowFreqs.map(f=>({f,m:goertzel(f,buf,sr)}));
+      const colMags=colFreqs.map(f=>({f,m:goertzel(f,buf,sr)}));
+      const bestRow=rowMags.reduce((a,b)=>b.m>a.m?b:a);
+      const bestCol=colMags.reduce((a,b)=>b.m>a.m?b:a);
+      const totalPower=rowMags.reduce((s,x)=>s+x.m,0)+colMags.reduce((s,x)=>s+x.m,0);
+
+      // Signal must be loud, one row and one col must dominate clearly
+      const rowDominance=bestRow.m/rowMags.reduce((s,x)=>s+x.m,0);
+      const colDominance=bestCol.m/colMags.reduce((s,x)=>s+x.m,0);
+      const DOMINANCE_THRESH=0.55;
+      const POWER_THRESH=0.005;
+
+      if(bestRow.m>POWER_THRESH&&bestCol.m>POWER_THRESH&&rowDominance>DOMINANCE_THRESH&&colDominance>DOMINANCE_THRESH){
+        const ri=rowFreqs.indexOf(bestRow.f);
+        const ci=colFreqs.indexOf(bestCol.f);
+        if(ri>=0&&ci>=0){
+          const d=dtmfMap[ri][ci];
+          if('0123456789'.includes(d)) digitLatch=d;
+        }
+      } else {
+        digitLatch='';
+      }
+      animFrame=requestAnimationFrame(loop);
+    }
+    loop();
+  }).catch(e=>{
+    st.textContent='Mic error: '+e.message;st.className='status error';
+    stopRx();
+  });
+}
+
+/* ── AFSK RECEIVER ── */
+function startAFSKRx(){
+  if(isReceiving)return;
+  const outEl=document.getElementById('afsk-rx-out');
+  const st=document.getElementById('afsk-status');
+  const meterEl=document.getElementById('afsk-meter');
+  document.getElementById('afsk-rx-btn').disabled=true;
+  document.getElementById('afsk-rx-stop').disabled=false;
+  outEl.textContent='Listening — waiting for AFSK signal...';
+  st.textContent='Mic active. Hold phone near radio speaker.';st.className='status active';
+  isReceiving=true;
+  navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}}).then(stream=>{
+    rxStream=stream;
+    const ctx=getAudioCtx();
+    const src=ctx.createMediaStreamSource(stream);
+    const analyser=ctx.createAnalyser();
+    analyser.fftSize=1024;
+    src.connect(analyser);
+    const N=analyser.fftSize;
+    const buf=new Float32Array(N);
+    const baud=parseInt(document.getElementById('afsk-baud').value);
+    const sr=ctx.sampleRate;
+    const MARK=1200,SPACE=2200;
+
+    // Rolling sample buffer for zero-crossing FSK detection
+    const sampleBuf=[];
+    const SAMPLES_PER_BIT=Math.round(sr/baud);
+    let bitHistory='';
+    let decoded='';
+    let lastUpdateTime=0;
+
+    function goertzel(freq,samples){
+      const k=Math.round(freq*N/sr);
+      const w=2*Math.PI*k/N;
+      const coeff=2*Math.cos(w);
+      let s0=0,s1=0,s2=0;
+      for(let i=0;i<samples.length;i++){s0=samples[i]+coeff*s1-s2;s2=s1;s1=s0;}
+      return s1*s1+s2*s2-coeff*s1*s2;
+    }
+    function rms(samples){
+      let sum=0;for(let i=0;i<samples.length;i++) sum+=samples[i]*samples[i];
+      return Math.sqrt(sum/samples.length);
+    }
+
+    function tryDecode(bits){
+      // Look for valid 8N1 byte frames: start(0) + 8 data bits + stop(1)
+      const chars=[];
+      for(let i=0;i<bits.length-9;i++){
+        if(bits[i]==='0'&&bits[i+9]==='1'){
+          let byte=0;
+          for(let b=0;b<8;b++) byte|=(bits[i+1+b]==='1'?1:0)<<b;
+          const c=String.fromCharCode(byte);
+          if('0123456789'.includes(c)){chars.push(c);i+=9;}
+        }
+      }
+      return chars.length>=15?chars.slice(-15).join(''):null;
+    }
+
+    function loop(){
+      if(!isReceiving)return;
+      analyser.getFloatTimeDomainData(buf);
+      const level=rms(buf);
+      const meterPct=Math.min(100,Math.round(level*600));
+      meterEl.style.width=meterPct+'%';
+      meterEl.className='meter-fill '+(meterPct<20?'green':meterPct<60?'amber':'red');
+
+      const NOISE_GATE=0.008;
+      if(level>NOISE_GATE){
+        const mMark=goertzel(MARK,buf);
+        const mSpace=goertzel(SPACE,buf);
+        const total=mMark+mSpace;
+        if(total>0.001){
+          const bit=mMark>mSpace?'1':'0';
+          bitHistory+=bit;
+          if(bitHistory.length>600) bitHistory=bitHistory.slice(-600);
+          const now=Date.now();
+          if(now-lastUpdateTime>200){
+            lastUpdateTime=now;
+            st.textContent='Signal detected — decoding... ('+Math.round(meterPct)+'%)';
+            const result=tryDecode(bitHistory);
+            if(result){
+              outEl.textContent='Decoded: '+result;
+              const r=decodePayload(result);
+              if(r){
+                document.getElementById('afsk-decoded-coords').style.display='grid';
+                document.getElementById('afsk-lat').textContent=r.lat;
+                document.getElementById('afsk-lon').textContent=r.lon;
+                st.textContent='Done! Lat:'+r.lat+' Lon:'+r.lon;st.className='status';
+                stopRx();return;
+              }
+            }
+          }
+        }
+      } else {
+        if(Date.now()-lastUpdateTime>500) st.textContent='Listening — no signal yet (hold phone closer)';
+      }
+      animFrame=requestAnimationFrame(loop);
+    }
+    loop();
+  }).catch(e=>{
+    st.textContent='Mic error: '+e.message;st.className='status error';
+    stopRx();
+  });
+}
+
+function stopRx(){
+  isReceiving=false;
+  if(animFrame){cancelAnimationFrame(animFrame);animFrame=null;}
+  if(rxStream){rxStream.getTracks().forEach(t=>t.stop());rxStream=null;}
+  ['dtmf','afsk'].forEach(m=>{
+    const rxBtn=document.getElementById(m+'-rx-btn');
+    const stopBtn=document.getElementById(m+'-rx-stop');
+    if(rxBtn) rxBtn.disabled=false;
+    if(stopBtn) stopBtn.disabled=true;
+  });
+}
+</script>
